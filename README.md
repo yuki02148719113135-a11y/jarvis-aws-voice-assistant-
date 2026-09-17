@@ -9,16 +9,29 @@ Amazon Nova 2 Sonic を使った音声対話アシスタントを、Terraform �
 
 ## 構成
 
-| 層 | 内容 |
+| 役割 | 使用サービス |
 |---|---|
-| 音声対話 | Amazon Nova 2 Sonic（Bedrock、双方向ストリーミング） |
+| 音声対話 | Amazon Bedrock / Nova 2 Sonic |
 | 実行基盤 | ECS Fargate（0.5 vCPU / 1 GiB、Spot） |
 | 接続 | ALB（WebSocket、スティッキーセッション有効） |
 | 記憶 | DynamoDB（オンデマンド、TTL 付き） |
+| イメージ | ECR |
 | IaC | Terraform 1.14 / AWS Provider 6.x |
 | リージョン | ap-northeast-1 |
 
-![アーキテクチャ](docs/vpc-resource-map.png)
+![VPCリソースマップ](docs/vpc-resource-map.png)
+
+*構成A。ALB の要件を満たすためパブリックサブネットを 2AZ に配置し、Fargate タスクとゲートウェイエンドポイント（S3 / DynamoDB）を同一 VPC 内に置いている。*
+
+### Nova 2 Sonic
+
+音声を直接受け取り音声を返す speech-to-speech モデル。
+STT → LLM → TTS と繋ぐ従来構成に比べて応答遅延が小さい。
+クロスリージョン推論には非対応のため、東京リージョンへ直接リクエストを投げる必要がある。
+
+![Bedrockモデルアクセス](docs/bedrock-model-access.png)
+
+*モデル ID は `amazon.nova-2-sonic-v1:0`。東京リージョンで `AUTHORIZED` / `AVAILABLE` を確認済み。*
 
 ---
 
@@ -28,14 +41,30 @@ Amazon Nova 2 Sonic を使った音声対話アシスタントを、Terraform �
 
 Terraform を `persistent/` と `ephemeral/` に分け、state ファイルも別管理にしている。
 
-- **persistent** — S3（tfstate）、DynamoDB、ECR、IAM ロール2種。消さない
-- **ephemeral** — VPC、ALB、ECS。作業のたびに作って壊す
+```
+jarvis/
+├── persistent/   # 消さない：S3(tfstate), DynamoDB, ECR, IAM
+├── ephemeral/    # 毎回消す：VPC, ALB, ECS
+└── app/          # Dockerfile, FastAPI
+```
 
 分離しないと、`destroy` のたびに会話履歴とコンテナイメージが消えて、毎回ゼロから作り直すことになる。
 ephemeral 側は `terraform_remote_state` で persistent の output を参照し、ARN をハードコードしない。
 
+![S3のstate2層](docs/s3-state-layers.png)
+
+*同一バケット内で `persistent/` と `ephemeral/` にキーを分けている。ephemeral を destroy しても persistent の state は残る。*
+
 ECR を persistent 側に置いたのは、イメージのビルドと push をやり直すと
 apply の所要時間が跳ね上がるため。
+
+![ECRイメージ一覧](docs/ecr-images.png)
+
+*イメージサイズ 61.5 MB。ライフサイクルポリシーで直近5世代のみ保持。タグなしのマニフェストも残る点に注意。*
+
+![DynamoDBテーブル](docs/dynamodb-table.png)
+
+*パーティションキー `session_id`、ソートキー `created_at`、オンデマンド課金。`expires_at` で TTL を設定済み。*
 
 ### 2. 実行基盤に AgentCore Runtime ではなく Fargate を選んだ
 
@@ -45,6 +74,14 @@ AgentCore Runtime のほうが構築は速いが、以下の理由で Fargate �
 - WebSocket の保持、スケーリング、監視を自分で設計する必要があり、学習効果が高い
 - ネットワーク構成を含めて IaC で完結できる
 - SAP（Solutions Architect Professional）の出題領域と重なる
+
+![ECSサービス](docs/ecs-service.png)
+
+*タスク1件が実行中、デプロイステータス成功、ターゲット正常性1件。*
+
+![ECSタスク詳細](docs/ecs-task.png)
+
+*0.5 vCPU / 1 GiB、起動タイプ Fargate。プロビジョニングからイメージ pull、実行までのライフサイクル。*
 
 ### 3. VPC エンドポイントをやめてパブリックサブネットにした
 
@@ -81,20 +118,19 @@ Nova Sonic のセッションはタスクのメモリ上にあるため、
 再接続時に別タスクへ振られると会話が失われる。
 Sprint 3 で状態を DynamoDB へ外出しするまでの暫定措置。
 
+![curlのレスポンスヘッダー](docs/curl-health-headers.png)
+
+*`AWSALB` Cookie が返っており、スティッキーセッションが実際に機能していることが確認できる。*
+
 ### 6. 3構成を変数で切り替えられるようにした
 
 `use_vpc_endpoints` と `use_nat` の bool 変数だけで A / B / C を切り替えられる。
 ブランチを分けずに済むので、コスト比較を `terraform apply` 一発で再現できる。
 
-```hcl
-# 構成A（常用）
-terraform apply
-
-# 構成B（検証用）
-terraform apply -var="use_vpc_endpoints=true"
-
-# 構成C（検証用）
-terraform apply -var="use_nat=true"
+```bash
+terraform apply                                # 構成A（常用）
+terraform apply -var="use_vpc_endpoints=true"  # 構成B
+terraform apply -var="use_nat=true"            # 構成C
 ```
 
 ---
@@ -110,10 +146,15 @@ terraform apply -var="use_nat=true"
 | 稼働コスト（構成A） | 約 6 円/時 |
 | Nova 2 Sonic | 会話 1分あたり約 2.3 円 |
 
-apply 完了から `/health` が通るまで、ALB のヘルスチェック通過を含めて約1分。
+![apply完了](docs/apply-complete.png)
 
-![apply結果](docs/apply-complete.png)
-![ヘルスチェック](docs/target-group-healthy.png)
+*19リソースを3分6秒で構築。`active_config` の output で、どの構成で立っているかを判別できるようにしている。*
+
+![ターゲットグループ正常](docs/target-group-healthy.png)
+
+*ALB のヘルスチェック通過。ECS で最も詰まりやすい部分で、タスクのバインドアドレスを `0.0.0.0` にすることが条件。*
+
+apply 完了から `/health` が通るまで、ヘルスチェック通過を含めて約1分。
 
 ---
 
