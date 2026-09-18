@@ -1,2 +1,6 @@
 fastapi==0.115.6
 uvicorn[standard]==0.34.0
+# 双方向ストリーミング用。Developer Preview のためバージョンは固定しない。
+# awscrt エクストラが必須（標準の HTTP トランスポートは HTTP/2 の
+# 双方向イベントストリームに対応していない）。
+aws-sdk-bedrock-runtime[awscrt]

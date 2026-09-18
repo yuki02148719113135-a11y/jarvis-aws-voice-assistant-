@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jarvis</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --fg: #e6e8eb;
+    --muted: #8b929e;
+    --accent: #4a9eff;
+    --user: #2a3140;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    min-height: 100vh;
+  }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  .status { color: var(--muted); font-size: 13px; }
+  button {
+    background: var(--accent);
+    color: #fff;
+    border: 0;
+    border-radius: 8px;
+    padding: 14px 28px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    align-self: flex-start;
+  }
+  button:disabled { opacity: .4; cursor: default; }
+  button.stop { background: #d9534f; }
+  #log {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow-y: auto;
+  }
+  .msg {
+    padding: 10px 14px;
+    border-radius: 10px;
+    max-width: 80%;
+    font-size: 14px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+  }
+  .msg.user { background: var(--user); align-self: flex-end; }
+  .msg.assistant { background: #1b2430; align-self: flex-start; }
+  .msg .role { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+</style>
+</head>
+<body>
+  <h1>jarvis</h1>
+  <div class="status" id="status">idle</div>
+  <button id="toggle">Start talking</button>
+  <div id="log"></div>
+
+<script>
+const INPUT_RATE = 16000;   // Bedrock に送る形式
+const OUTPUT_RATE = 24000;  // Bedrock から返ってくる形式
+
+const statusEl = document.getElementById("status");
+const logEl = document.getElementById("log");
+const toggleEl = document.getElementById("toggle");
+
+let ws = null;
+let micContext = null;
+let micStream = null;
+let playContext = null;
+let nextPlayTime = 0;
+let running = false;
+
+function setStatus(text) { statusEl.textContent = text; }
+
+function addMessage(role, text) {
+  // 同じ役割の連続した断片は1つの吹き出しにまとめる
+  const last = logEl.lastElementChild;
+  if (last && last.dataset.role === role) {
+    last.append(text);
+  } else {
+    const el = document.createElement("div");
+    el.className = "msg " + (role === "USER" ? "user" : "assistant");
+    el.dataset.role = role;
+    const label = document.createElement("span");
+    label.className = "role";
+    label.textContent = role === "USER" ? "you" : "jarvis";
+    el.appendChild(label);
+    el.append(text);
+    logEl.appendChild(el);
+  }
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function base64ToInt16(b64) {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Int16Array(bytes.buffer);
+}
+
+function playChunk(b64) {
+  const samples = base64ToInt16(b64);
+  const buffer = playContext.createBuffer(1, samples.length, OUTPUT_RATE);
+  const channel = buffer.getChannelData(0);
+  for (let i = 0; i < samples.length; i++) channel[i] = samples[i] / 0x8000;
+
+  const source = playContext.createBufferSource();
+  source.buffer = buffer;
+  source.connect(playContext.destination);
+
+  // 前のチャンクの終わりに繋げて途切れさせない
+  const now = playContext.currentTime;
+  if (nextPlayTime < now) nextPlayTime = now;
+  source.start(nextPlayTime);
+  nextPlayTime += buffer.duration;
+}
+
+async function start() {
+  setStatus("requesting microphone...");
+  micStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      channelCount: 1,
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  });
+
+  // ブラウザにリサンプルさせる。自前で間引くより確実
+  micContext = new AudioContext({ sampleRate: INPUT_RATE });
+  playContext = new AudioContext({ sampleRate: OUTPUT_RATE });
+  nextPlayTime = 0;
+
+  if (micContext.sampleRate !== INPUT_RATE) {
+    setStatus(`warning: got ${micContext.sampleRate}Hz instead of ${INPUT_RATE}Hz`);
+  }
+
+  setStatus("connecting...");
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.binaryType = "arraybuffer";
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === "ready") {
+      setStatus("listening — speak now");
+    } else if (msg.type === "text") {
+      addMessage(msg.role, msg.content);
+    } else if (msg.type === "audio") {
+      playChunk(msg.content);
+    } else if (msg.type === "speech_start") {
+      setStatus("jarvis is speaking...");
+    } else if (msg.type === "speech_end") {
+      setStatus("listening — speak now");
+    }
+  };
+
+  ws.onclose = () => { setStatus("disconnected"); stop(); };
+  ws.onerror = () => setStatus("websocket error");
+
+  await new Promise((resolve, reject) => {
+    ws.onopen = resolve;
+    setTimeout(() => reject(new Error("connect timeout")), 10000);
+  });
+
+  await micContext.audioWorklet.addModule("/static/pcm-processor.js");
+  const source = micContext.createMediaStreamSource(micStream);
+  const worklet = new AudioWorkletNode(micContext, "pcm-processor");
+
+  worklet.port.onmessage = (e) => {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(e.data.buffer);
+  };
+
+  source.connect(worklet);
+  // 出力に繋がないと process が走らないブラウザがあるため、無音で接続する
+  const silence = micContext.createGain();
+  silence.gain.value = 0;
+  worklet.connect(silence).connect(micContext.destination);
+
+  running = true;
+  toggleEl.textContent = "Stop";
+  toggleEl.classList.add("stop");
+}
+
+function stop() {
+  running = false;
+  toggleEl.textContent = "Start talking";
+  toggleEl.classList.remove("stop");
+
+  if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+  ws = null;
+  if (micStream) micStream.getTracks().forEach((t) => t.stop());
+  micStream = null;
+  if (micContext) micContext.close();
+  micContext = null;
+  if (playContext) playContext.close();
+  playContext = null;
+  setStatus("idle");
+}
+
+toggleEl.addEventListener("click", async () => {
+  if (running) { stop(); return; }
+  toggleEl.disabled = true;
+  try {
+    await start();
+  } catch (err) {
+    setStatus("error: " + err.message);
+    stop();
+  } finally {
+    toggleEl.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
