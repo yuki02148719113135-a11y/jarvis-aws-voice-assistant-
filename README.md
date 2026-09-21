@@ -3,7 +3,8 @@
 Amazon Nova 2 Sonic を使った音声対話アシスタントを、Terraform で AWS 上に構築するプロジェクト。
 個人開発だが、**「作って壊す」を前提としたインフラ設計とコスト最適化の判断**を主題に置いている。
 
-現在 Sprint 0（インフラ基盤）完了。音声機能の実装は Sprint 1 以降。
+Sprint 0（インフラ基盤）と Sprint 1（ブラウザからの音声対話）が完了。
+ブラウザのマイクで話しかけると、音声で返答が返る状態まで動作する。
 
 ---
 
@@ -16,6 +17,7 @@ Amazon Nova 2 Sonic を使った音声対話アシスタントを、Terraform �
 | 接続 | ALB（WebSocket、スティッキーセッション有効） |
 | 記憶 | DynamoDB（オンデマンド、TTL 付き） |
 | イメージ | ECR |
+| アプリ | FastAPI + AudioWorklet（素の JavaScript） |
 | IaC | Terraform 1.14 / AWS Provider 6.x |
 | リージョン | ap-northeast-1 |
 
@@ -35,7 +37,47 @@ STT → LLM → TTS と繋ぐ従来構成に比べて応答遅延が小さい。
 
 ---
 
-## 設計判断
+## Sprint 1：ブラウザからの音声対話
+
+### 音声の流れ
+
+```
+ブラウザ (マイク)
+  → AudioContext({sampleRate: 16000}) でリサンプル
+  → AudioWorklet で float32 → int16 変換
+  → WebSocket (バイナリ)
+  → FastAPI
+  → Bedrock (16kHz PCM, base64)
+
+Bedrock (24kHz PCM, base64)
+  → FastAPI
+  → WebSocket (JSON)
+  → ブラウザ (AudioBufferSourceNode を連結再生)
+```
+
+**サーバーは変換をしない。** サンプルレートの取り扱いはブラウザ側で完結させ、
+FastAPI は中継に徹している。こうすることで Fargate 側の CPU 負荷を最小に保てる。
+
+### 設計上の判断
+
+**リサンプルを自前で書かない。**
+ブラウザのマイクは通常 48kHz で取得されるが、Nova 2 Sonic の入力は 16kHz。
+`new AudioContext({ sampleRate: 16000 })` を指定すればブラウザ側が変換してくれるため、
+間引き処理を自分で実装する必要がない。
+
+**ローカル開発で HTTPS を回避した。**
+ブラウザでマイクを使う `getUserMedia` はセキュアコンテキストを要求するが、
+`localhost` は例外として扱われる。TLS 対応は Sprint 2 以降に回し、
+Sprint 1 の実装中は AWS 側のリソースを一切立てずに進めた。
+この間の課金は Bedrock の会話分のみ（会話1分あたり約 2.3 円）。
+
+**AudioWorklet の出力を無音のゲインに接続している。**
+接続先がないと `process()` が呼ばれないブラウザがあるため、
+gain 0 のノード経由で destination に繋いでいる。
+
+---
+
+## 設計判断（インフラ）
 
 ### 1. state を2層に分離した
 
@@ -45,7 +87,7 @@ Terraform を `persistent/` と `ephemeral/` に分け、state ファイルも�
 jarvis/
 ├── persistent/   # 消さない：S3(tfstate), DynamoDB, ECR, IAM
 ├── ephemeral/    # 毎回消す：VPC, ALB, ECS
-└── app/          # Dockerfile, FastAPI
+└── app/          # FastAPI, AudioWorklet, Dockerfile
 ```
 
 分離しないと、`destroy` のたびに会話履歴とコンテナイメージが消えて、毎回ゼロから作り直すことになる。
@@ -175,9 +217,62 @@ terraform destroy
 persistent 層は残るため、会話履歴もコンテナイメージも保持される。
 月あたりの保持コストは数円。
 
+### ローカルでの開発
+
+Sprint 1 の実装中は AWS 側のリソースを立てず、Docker で動かした。
+
+```bash
+cd app
+docker run --rm -it -p 8080:8080 \
+  -v ~/.aws:/root/.aws:ro -v "$PWD":/app \
+  -e AWS_PROFILE=<profile> -e AWS_REGION=ap-northeast-1 \
+  -e VOICE_ID=tiffany \
+  jarvis:latest uvicorn main:app --host 0.0.0.0 --port 8080 --reload
+```
+
+`http://localhost:8080` を開く。localhost はセキュアコンテキスト扱いのため、
+HTTPS なしでマイクが使える。
+
 ---
 
 ## 詰まった点
+
+### Nova 2 Sonic はテキストのみのセッションを受け付けない
+
+コスト削減のためテキストだけで疎通確認をしようとしたところ、
+`Prompt must have at least one audio content` で弾かれた。
+
+プロンプトには最低1つの AUDIO コンテンツが必要で、
+システムプロンプトを TEXT で渡すことはできても、
+ユーザー入力を TEXT だけで完結させることはできない。
+
+### 双方向ストリーミングには AWS CRT が必須
+
+標準の HTTP トランスポートは HTTP/2 の双方向イベントストリームに対応していない。
+`aws-sdk-bedrock-runtime[awscrt]` を入れ、`AWSCRTHTTPClient()` を明示的に渡す必要がある。
+またこの SDK は Python 3.12 以上を要求する（macOS 標準の 3.9 では動かない）。
+
+### 認証情報が誤っていても例外が飛ばない
+
+イベントが1件も返らないまま無限に待ち続ける。
+「エラーも出ないが動かない」という状態になるため、
+`asyncio.wait_for` でタイムアウトを設けて切り分けられるようにした。
+
+### textOutput が確定前と確定後の2回送られてくる
+
+そのまま流すと同じ発言が二重に表示される。
+当初は `stopReason` で判別しようとしたが、想定した値と異なり効かなかった。
+最終的に**直近12件のテキストを保持し、同一内容が来たら捨てる**方式にした。
+値の仕様に依存しないぶん、こちらのほうが壊れにくい。
+
+### 割り込みが専用イベントではなく textOutput で届く
+
+ユーザーが発話に被せると `{"interrupted": true}` という JSON が
+`textOutput` の content として送られてくる。
+中身を見て振り分けないと、会話ログに JSON がそのまま並ぶ。
+
+さらに、割り込みを検知したらブラウザ側で**再生予約済みの音声を破棄する**必要がある。
+これをしないと、遮ったはずの発言が最後まで再生され続ける。
 
 ### terraform plan は IAM 権限不足を検出しない
 
@@ -220,9 +315,21 @@ aws ecr delete-repository --repository-name jarvis --force
 
 ---
 
+## 現時点の制約
+
+**日本語は公式には未対応。**
+AWS のドキュメント上、Nova 2 Sonic の対応言語は英語・仏語・伊語・独語・西語の5言語で、
+日本語は含まれていない。ただし実際に試したところ、日本語での発話認識と応答の両方が動作した。
+文字起こしの精度は短い発話や固有名詞で落ちる傾向がある。
+
+**外部情報にアクセスできない。**
+現在の日付や天気を尋ねても、学習データに基づく推測しか返せない。
+ツール連携は Sprint 2 の課題。
+
+---
+
 ## 今後
 
-- **Sprint 1** — Nova 2 Sonic との双方向ストリーミング実装、TLS 対応（ブラウザのマイク利用には HTTPS が必須）
-- **Sprint 2** — 外部ツール連携（カレンダー参照）
+- **Sprint 2** — 外部ツール連携（カレンダー参照）、TLS 対応と Fargate へのデプロイ
 - **Sprint 3** — 会話状態の DynamoDB 永続化、スティッキーセッションの解消
 - **Sprint 4** — Cognito 認証、GitHub Actions による CI/CD

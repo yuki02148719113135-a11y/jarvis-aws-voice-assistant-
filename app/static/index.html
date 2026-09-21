@@ -57,6 +57,7 @@
   .msg.user { background: var(--user); align-self: flex-end; }
   .msg.assistant { background: #1b2430; align-self: flex-start; }
   .msg .role { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .note { align-self: center; font-size: 11px; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -78,12 +79,12 @@ let micContext = null;
 let micStream = null;
 let playContext = null;
 let nextPlayTime = 0;
+let playing = [];        // 再生予約済みのソース。割り込み時に止める
 let running = false;
 
 function setStatus(text) { statusEl.textContent = text; }
 
 function addMessage(role, text) {
-  // 同じ役割の連続した断片は1つの吹き出しにまとめる
   const last = logEl.lastElementChild;
   if (last && last.dataset.role === role) {
     last.append(text);
@@ -98,6 +99,14 @@ function addMessage(role, text) {
     el.append(text);
     logEl.appendChild(el);
   }
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function addNote(text) {
+  const el = document.createElement("div");
+  el.className = "note";
+  el.textContent = text;
+  logEl.appendChild(el);
   logEl.scrollTop = logEl.scrollHeight;
 }
 
@@ -118,11 +127,25 @@ function playChunk(b64) {
   source.buffer = buffer;
   source.connect(playContext.destination);
 
-  // 前のチャンクの終わりに繋げて途切れさせない
   const now = playContext.currentTime;
   if (nextPlayTime < now) nextPlayTime = now;
   source.start(nextPlayTime);
   nextPlayTime += buffer.duration;
+
+  playing.push(source);
+  source.onended = () => {
+    playing = playing.filter((s) => s !== source);
+  };
+}
+
+function stopPlayback() {
+  // 割り込まれたら予約済みの音声を全部破棄する。
+  // これをしないと、遮ったはずの発言が最後まで再生され続ける。
+  for (const source of playing) {
+    try { source.stop(); } catch (e) { /* 既に終わっている */ }
+  }
+  playing = [];
+  nextPlayTime = playContext ? playContext.currentTime : 0;
 }
 
 async function start() {
@@ -136,10 +159,10 @@ async function start() {
     },
   });
 
-  // ブラウザにリサンプルさせる。自前で間引くより確実
   micContext = new AudioContext({ sampleRate: INPUT_RATE });
   playContext = new AudioContext({ sampleRate: OUTPUT_RATE });
   nextPlayTime = 0;
+  playing = [];
 
   if (micContext.sampleRate !== INPUT_RATE) {
     setStatus(`warning: got ${micContext.sampleRate}Hz instead of ${INPUT_RATE}Hz`);
@@ -158,6 +181,10 @@ async function start() {
       addMessage(msg.role, msg.content);
     } else if (msg.type === "audio") {
       playChunk(msg.content);
+    } else if (msg.type === "interrupted") {
+      stopPlayback();
+      addNote("— interrupted —");
+      setStatus("listening — speak now");
     } else if (msg.type === "speech_start") {
       setStatus("jarvis is speaking...");
     } else if (msg.type === "speech_end") {
@@ -205,6 +232,7 @@ function stop() {
   micContext = null;
   if (playContext) playContext.close();
   playContext = null;
+  playing = [];
   setStatus("idle");
 }
 

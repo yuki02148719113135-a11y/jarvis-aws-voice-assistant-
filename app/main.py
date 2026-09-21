@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import uuid
+from collections import deque
 from typing import Any
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -39,6 +40,11 @@ VOICE_ID = os.getenv("VOICE_ID", "matthew")
 INPUT_SAMPLE_RATE = 16000
 OUTPUT_SAMPLE_RATE = 24000
 
+# 直近この件数のテキストを覚えておき、同じ内容が来たら捨てる。
+# Nova Sonic は確定前と確定後の両方を textOutput で送ってくるため、
+# そのまま流すと同じ発言が二重に並ぶ。stopReason の値に依存しない方法。
+RECENT_TEXT_WINDOW = 12
+
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     "You are a helpful voice assistant. Keep responses short, "
@@ -50,6 +56,21 @@ app = FastAPI()
 
 def event(payload: dict) -> str:
     return json.dumps({"event": payload}, ensure_ascii=False)
+
+
+def parse_interrupt(content: str) -> bool:
+    """textOutput に紛れてくる {"interrupted": true} を判別する。
+
+    Nova Sonic は割り込みを専用イベントではなく textOutput として送るため、
+    中身を見て振り分けないと会話ログに JSON がそのまま並ぶ。
+    """
+    stripped = content.strip()
+    if not stripped.startswith("{"):
+        return False
+    try:
+        return bool(json.loads(stripped).get("interrupted"))
+    except json.JSONDecodeError:
+        return False
 
 
 class SonicSession:
@@ -222,6 +243,8 @@ async def bedrock_to_browser(ws: WebSocket, stream: Any) -> None:
     if output is None:
         raise RuntimeError("出力ストリームが返ってこなかった")
 
+    recent: deque[str] = deque(maxlen=RECENT_TEXT_WINDOW)
+
     async for item in output:
         if isinstance(item, InvokeModelWithBidirectionalStreamOutputChunk):
             payload = item.value.bytes_
@@ -230,17 +253,13 @@ async def bedrock_to_browser(ws: WebSocket, stream: Any) -> None:
             data = json.loads(payload.decode("utf-8")).get("event", {})
 
             if "textOutput" in data:
-                text = data["textOutput"].get("content", "")
-                role = data["textOutput"].get("role", "")
-                log.info("[%s] %s", role or "text", text)
-                await ws.send_json({"type": "text", "role": role, "content": text})
+                await handle_text(ws, data["textOutput"], recent)
 
             if "audioOutput" in data:
                 content = data["audioOutput"].get("content", "")
                 if content:
                     await ws.send_json({"type": "audio", "content": content})
 
-            # モデルが話し始めたらブラウザ側の再生をリセットさせる
             if "contentStart" in data and data["contentStart"].get("type") == "AUDIO":
                 await ws.send_json({"type": "speech_start"})
 
@@ -252,6 +271,30 @@ async def bedrock_to_browser(ws: WebSocket, stream: Any) -> None:
         else:
             value = getattr(item, "value", None)
             raise RuntimeError(getattr(value, "message", None) or type(item).__name__)
+
+
+async def handle_text(ws: WebSocket, text_output: dict, recent: deque) -> None:
+    content = text_output.get("content", "")
+    role = text_output.get("role", "")
+
+    # 割り込みの通知。会話としては表示せず、再生中の音声を止めさせる
+    if parse_interrupt(content):
+        log.info("interrupted by user")
+        await ws.send_json({"type": "interrupted"})
+        return
+
+    normalized = content.strip()
+    if not normalized:
+        return
+
+    # 同じ内容が再送されてきたら捨てる
+    key = f"{role}:{normalized}"
+    if key in recent:
+        return
+    recent.append(key)
+
+    log.info("[%s] %s", role or "text", content)
+    await ws.send_json({"type": "text", "role": role, "content": content})
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
