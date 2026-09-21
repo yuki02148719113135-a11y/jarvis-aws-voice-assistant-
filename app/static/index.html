@@ -1,9 +1,10 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ja" translate="no">
 <head>
 <meta charset="utf-8">
+<meta name="google" content="notranslate">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>jarvis</title>
+<title>ジャービス</title>
 <style>
   :root {
     --bg: #0f1115;
@@ -61,9 +62,9 @@
 </style>
 </head>
 <body>
-  <h1>jarvis</h1>
-  <div class="status" id="status">idle</div>
-  <button id="toggle">Start talking</button>
+  <h1>ジャービス</h1>
+  <div class="status" id="status">待機中</div>
+  <button id="toggle">話しかける</button>
   <div id="log"></div>
 
 <script>
@@ -94,7 +95,7 @@ function addMessage(role, text) {
     el.dataset.role = role;
     const label = document.createElement("span");
     label.className = "role";
-    label.textContent = role === "USER" ? "you" : "jarvis";
+    label.textContent = role === "USER" ? "あなた" : "ジャービス";
     el.appendChild(label);
     el.append(text);
     logEl.appendChild(el);
@@ -149,7 +150,7 @@ function stopPlayback() {
 }
 
 async function start() {
-  setStatus("requesting microphone...");
+  setStatus("マイクを準備中...");
   micStream = await navigator.mediaDevices.getUserMedia({
     audio: {
       channelCount: 1,
@@ -168,7 +169,7 @@ async function start() {
     setStatus(`warning: got ${micContext.sampleRate}Hz instead of ${INPUT_RATE}Hz`);
   }
 
-  setStatus("connecting...");
+  setStatus("接続中...");
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.binaryType = "arraybuffer";
@@ -176,26 +177,26 @@ async function start() {
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type === "ready") {
-      setStatus("listening — speak now");
+      setStatus("聞いています");
     } else if (msg.type === "text") {
       addMessage(msg.role, msg.content);
     } else if (msg.type === "audio") {
       playChunk(msg.content);
     } else if (msg.type === "tool") {
-      addNote(`— tool: ${msg.name} —`);
+      addNote(`— ツール: ${msg.name} —`);
     } else if (msg.type === "interrupted") {
       stopPlayback();
-      addNote("— interrupted —");
-      setStatus("listening — speak now");
+      addNote("— 中断 —");
+      setStatus("聞いています");
     } else if (msg.type === "speech_start") {
-      setStatus("jarvis is speaking...");
+      setStatus("ジャービスが話しています");
     } else if (msg.type === "speech_end") {
-      setStatus("listening — speak now");
+      setStatus("聞いています");
     }
   };
 
-  ws.onclose = () => { setStatus("disconnected"); stop(); };
-  ws.onerror = () => setStatus("websocket error");
+  ws.onclose = () => { setStatus("切断されました"); stop(); };
+  ws.onerror = () => setStatus("接続エラー");
 
   await new Promise((resolve, reject) => {
     ws.onopen = resolve;
@@ -217,13 +218,13 @@ async function start() {
   worklet.connect(silence).connect(micContext.destination);
 
   running = true;
-  toggleEl.textContent = "Stop";
+  toggleEl.textContent = "停止";
   toggleEl.classList.add("stop");
 }
 
 function stop() {
   running = false;
-  toggleEl.textContent = "Start talking";
+  toggleEl.textContent = "話しかける";
   toggleEl.classList.remove("stop");
 
   if (ws && ws.readyState === WebSocket.OPEN) ws.close();
@@ -235,7 +236,7 @@ function stop() {
   if (playContext) playContext.close();
   playContext = null;
   playing = [];
-  setStatus("idle");
+  setStatus("待機中");
 }
 
 toggleEl.addEventListener("click", async () => {
@@ -244,7 +245,7 @@ toggleEl.addEventListener("click", async () => {
   try {
     await start();
   } catch (err) {
-    setStatus("error: " + err.message);
+    setStatus("エラー: " + err.message);
     stop();
   } finally {
     toggleEl.disabled = false;

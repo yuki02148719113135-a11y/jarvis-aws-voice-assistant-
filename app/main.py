@@ -347,6 +347,8 @@ async def handle_text(ws: WebSocket, text_output: dict, recent: deque) -> None:
         await ws.send_json({"type": "interrupted"})
         return
 
+    # 文字起こしに混ざる話者マーカーの残骸を除く
+    content = content.replace("[spk]", "")
     normalized = content.strip()
     if not normalized:
         return
