@@ -43,7 +43,7 @@ STT → LLM → TTS と繋ぐ従来構成に比べて応答遅延が小さい。
 
 ## Sprint 1：ブラウザからの音声対話
 
-![音声フロー](docs/sprint1-audio-flow.png)
+![音声フロー](docs/sprint1-audio-flow.svg)
 
 *変換はすべてブラウザ側で完結し、サーバーは中継に徹している。*
 
