@@ -6,6 +6,10 @@ Amazon Nova 2 Sonic を使った音声対話アシスタントを、Terraform �
 Sprint 0（インフラ基盤）と Sprint 1（ブラウザからの音声対話）が完了。
 ブラウザのマイクで話しかけると、音声で返答が返る状態まで動作する。
 
+![ブラウザでの会話](docs/browser-conversation.png)
+
+*割り込み（`—中断された—`）を挟んでも文脈が保たれている。一方で現在の日付や天気は答えられない — 外部ツール連携が Sprint 2 の課題。*
+
 ---
 
 ## 構成
@@ -39,24 +43,13 @@ STT → LLM → TTS と繋ぐ従来構成に比べて応答遅延が小さい。
 
 ## Sprint 1：ブラウザからの音声対話
 
-### 音声の流れ
+![音声フロー](docs/sprint1-audio-flow.png)
 
-```
-ブラウザ (マイク)
-  → AudioContext({sampleRate: 16000}) でリサンプル
-  → AudioWorklet で float32 → int16 変換
-  → WebSocket (バイナリ)
-  → FastAPI
-  → Bedrock (16kHz PCM, base64)
+*変換はすべてブラウザ側で完結し、サーバーは中継に徹している。*
 
-Bedrock (24kHz PCM, base64)
-  → FastAPI
-  → WebSocket (JSON)
-  → ブラウザ (AudioBufferSourceNode を連結再生)
-```
-
-**サーバーは変換をしない。** サンプルレートの取り扱いはブラウザ側で完結させ、
-FastAPI は中継に徹している。こうすることで Fargate 側の CPU 負荷を最小に保てる。
+**サーバーは変換をしない。** サンプルレートの取り扱いはブラウザ側に寄せ、
+FastAPI は受け取った PCM をそのまま Bedrock へ、返ってきた音声をそのままブラウザへ流すだけにしている。
+Fargate 側の CPU 負荷を最小に保つための判断。
 
 ### 設計上の判断
 
@@ -261,9 +254,18 @@ HTTPS なしでマイクが使える。
 ### textOutput が確定前と確定後の2回送られてくる
 
 そのまま流すと同じ発言が二重に表示される。
+
+![修正前のログ](docs/log-before-dedup.png)
+
+*修正前。同じ段落が2回ずつ並び、断片の順序も入れ替わっている。*
+
 当初は `stopReason` で判別しようとしたが、想定した値と異なり効かなかった。
 最終的に**直近12件のテキストを保持し、同一内容が来たら捨てる**方式にした。
 値の仕様に依存しないぶん、こちらのほうが壊れにくい。
+
+![修正後のログ](docs/log-after-dedup.png)
+
+*修正後。重複が消え、`interrupted by user` が会話とは別に記録されている。割り込み直後も会話が継続している。*
 
 ### 割り込みが専用イベントではなく textOutput で届く
 
