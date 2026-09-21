@@ -30,6 +30,8 @@ from aws_sdk_bedrock_runtime.models import (
     InvokeModelWithBidirectionalStreamOutputUnknown,
 )
 
+from tools import TOOL_INSTRUCTIONS, TOOL_SPECS, run_tool
+
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("jarvis")
 
@@ -108,6 +110,9 @@ class SonicSession:
             "promptStart": {
                 "promptName": self.prompt,
                 "textOutputConfiguration": {"mediaType": "text/plain"},
+                # ツールを使うには出力形式の宣言とツール一覧の両方が必要
+                "toolUseOutputConfiguration": {"mediaType": "application/json"},
+                "toolConfiguration": {"tools": TOOL_SPECS},
                 "audioOutputConfiguration": {
                     "mediaType": "audio/lpcm",
                     "sampleRateHertz": OUTPUT_SAMPLE_RATE,
@@ -133,7 +138,7 @@ class SonicSession:
             "textInput": {
                 "promptName": self.prompt,
                 "contentName": system_content,
-                "content": SYSTEM_PROMPT,
+                "content": f"{SYSTEM_PROMPT}\n{TOOL_INSTRUCTIONS}",
             }
         }))
         await self.send(event({
@@ -166,6 +171,39 @@ class SonicSession:
                 "contentName": self.audio_content,
                 "content": base64.b64encode(pcm).decode("utf-8"),
             }
+        }))
+
+    async def send_tool_result(self, tool_use_id: str, result: dict) -> None:
+        """contentStart → toolResult → contentEnd の3点セットで結果を返す。
+
+        toolUseId が toolUse イベントのものと一致しないと、エラーにならずに
+        同じツールが呼ばれ直し続ける。受け取った値をそのまま返すこと。
+        """
+        content_name = str(uuid.uuid4())
+
+        await self.send(event({
+            "contentStart": {
+                "promptName": self.prompt,
+                "contentName": content_name,
+                "interactive": False,
+                "type": "TOOL",
+                "role": "TOOL",
+                "toolResultInputConfiguration": {
+                    "toolUseId": tool_use_id,
+                    "type": "TEXT",
+                    "textInputConfiguration": {"mediaType": "text/plain"},
+                },
+            }
+        }))
+        await self.send(event({
+            "toolResult": {
+                "promptName": self.prompt,
+                "contentName": content_name,
+                "content": json.dumps(result, ensure_ascii=False),
+            }
+        }))
+        await self.send(event({
+            "contentEnd": {"promptName": self.prompt, "contentName": content_name}
         }))
 
     async def close(self) -> None:
@@ -209,7 +247,7 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             await ws.send_json({"type": "ready"})
 
             pump = asyncio.create_task(browser_to_bedrock(ws, session))
-            drain = asyncio.create_task(bedrock_to_browser(ws, stream))
+            drain = asyncio.create_task(bedrock_to_browser(ws, stream, session))
 
             done, pending = await asyncio.wait(
                 {pump, drain}, return_when=asyncio.FIRST_COMPLETED
@@ -237,13 +275,14 @@ async def browser_to_bedrock(ws: WebSocket, session: SonicSession) -> None:
         log.error("browser_to_bedrock: %s", exc)
 
 
-async def bedrock_to_browser(ws: WebSocket, stream: Any) -> None:
+async def bedrock_to_browser(ws: WebSocket, stream: Any, session: SonicSession) -> None:
     """Bedrock の出力をブラウザへ転送する。音声は base64 のまま渡す。"""
     _, output = await stream.await_output()
     if output is None:
         raise RuntimeError("出力ストリームが返ってこなかった")
 
     recent: deque[str] = deque(maxlen=RECENT_TEXT_WINDOW)
+    pending_tool: dict | None = None
 
     async for item in output:
         if isinstance(item, InvokeModelWithBidirectionalStreamOutputChunk):
@@ -254,6 +293,19 @@ async def bedrock_to_browser(ws: WebSocket, stream: Any) -> None:
 
             if "textOutput" in data:
                 await handle_text(ws, data["textOutput"], recent)
+
+            # toolUse で呼び出し内容を受け取り、contentEnd(TOOL) で実行する。
+            # contentEnd が「モデルが結果を待っている」合図になる。
+            if "toolUse" in data:
+                pending_tool = data["toolUse"]
+
+            if (
+                "contentEnd" in data
+                and data["contentEnd"].get("type") == "TOOL"
+                and pending_tool is not None
+            ):
+                await handle_tool(ws, session, pending_tool)
+                pending_tool = None
 
             if "audioOutput" in data:
                 content = data["audioOutput"].get("content", "")
@@ -271,6 +323,18 @@ async def bedrock_to_browser(ws: WebSocket, stream: Any) -> None:
         else:
             value = getattr(item, "value", None)
             raise RuntimeError(getattr(value, "message", None) or type(item).__name__)
+
+
+async def handle_tool(ws: WebSocket, session: SonicSession, tool_use: dict) -> None:
+    name = tool_use.get("toolName", "")
+    tool_use_id = tool_use.get("toolUseId", "")
+    raw = tool_use.get("content", "")
+
+    result = await run_tool(name, raw)
+    log.info("[TOOL] %s(%s) -> %s", name, raw, result)
+
+    await session.send_tool_result(tool_use_id, result)
+    await ws.send_json({"type": "tool", "name": name, "result": result})
 
 
 async def handle_text(ws: WebSocket, text_output: dict, recent: deque) -> None:

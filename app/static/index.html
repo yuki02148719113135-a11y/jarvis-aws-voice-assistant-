@@ -181,6 +181,8 @@ async function start() {
       addMessage(msg.role, msg.content);
     } else if (msg.type === "audio") {
       playChunk(msg.content);
+    } else if (msg.type === "tool") {
+      addNote(`— tool: ${msg.name} —`);
     } else if (msg.type === "interrupted") {
       stopPlayback();
       addNote("— interrupted —");
