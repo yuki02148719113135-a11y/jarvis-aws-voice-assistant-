@@ -163,6 +163,7 @@ def get_weather(args: dict) -> dict:
     days = []
     for i, date in enumerate(daily.get("time", [])):
         days.append({
+            "label": ["今日", "明日", "明後日"][i] if i < 3 else date,
             "date": date,
             "weather": _describe(daily["weather_code"][i]),
             "max_c": _round(daily["temperature_2m_max"][i]),
