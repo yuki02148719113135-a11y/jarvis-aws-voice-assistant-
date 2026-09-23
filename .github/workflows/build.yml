@@ -23,6 +23,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: OIDC トークンの sub を確認（切り分け用）
+        run: |
+          echo "repository: $GITHUB_REPOSITORY"
+          echo "ref: $GITHUB_REF"
+          echo "expected sub: repo:$GITHUB_REPOSITORY:ref:$GITHUB_REF"
+
       - name: AWS の一時クレデンシャルを取得
         uses: aws-actions/configure-aws-credentials@v4
         with:
