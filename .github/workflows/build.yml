@@ -1,0 +1,47 @@
+name: build
+
+# app/ に変更が入ったときだけ動かす。README や図の修正でビルドしない。
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # OIDC のトークン発行に必要。これがないと assume できない。
+
+env:
+  AWS_REGION: ap-northeast-1
+  ECR_REPOSITORY: jarvis
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: AWS の一時クレデンシャルを取得
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: ECR にログイン
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: ビルドして push
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          IMAGE="$REGISTRY/$ECR_REPOSITORY"
+          # コミットSHAで固定タグを打つ。latest だけだと、どの版が動いているか
+          # 後から分からなくなる。
+          docker build --platform linux/amd64 \
+            -t "$IMAGE:${GITHUB_SHA::7}" -t "$IMAGE:latest" app
+          docker push "$IMAGE:${GITHUB_SHA::7}"
+          docker push "$IMAGE:latest"
+          echo "pushed $IMAGE:${GITHUB_SHA::7}" >> "$GITHUB_STEP_SUMMARY"

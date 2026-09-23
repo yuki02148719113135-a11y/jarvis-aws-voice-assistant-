@@ -25,3 +25,8 @@ output "tfstate_bucket" {
   description = "backend 設定に書くバケット名"
   value       = aws_s3_bucket.tfstate.id
 }
+
+output "github_actions_role_arn" {
+  description = "GitHub Actions が assume するロール（ワークフローの vars に入れる）"
+  value       = aws_iam_role.github_actions.arn
+}

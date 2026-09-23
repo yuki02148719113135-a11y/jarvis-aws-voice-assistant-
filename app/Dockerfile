@@ -5,7 +5,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py .
+# ローカルはフォルダをマウントして動かすため気づきにくいが、
+# ここに書いたものだけがイメージに入る。1ファイルでも漏れると起動しない。
+COPY main.py tools.py memory.py ./
+COPY static ./static
 
 ENV PORT=8080
 EXPOSE 8080
