@@ -179,6 +179,38 @@ TTL で7日後に自動的に消える。
 
 ---
 
+## Sprint 4：CI/CD
+
+`app/` に変更を push すると、GitHub Actions がイメージをビルドして ECR へ送る。
+AWS の認証は OIDC で、アクセスキーは発行していない。
+
+| 項目 | 内容 |
+|---|---|
+| 認証 | GitHub OIDC → `jarvis-github-actions` ロールを assume |
+| 権限 | このリポジトリの ECR へ push するだけ（`ecr:PutImage` など） |
+| 起動条件 | `main` への push のうち `app/` 配下が変わったときのみ |
+| タグ | コミットSHAの先頭7桁と `latest` の2つ |
+
+### 設計上の判断
+
+**アクセスキーを発行しない。**
+キーを GitHub の Secrets に置く方式は、漏れたとき取り消すまで使われ続ける。
+OIDC なら GitHub が発行する短命なトークンと引き換えに一時クレデンシャルを受け取るので、
+保存する秘密がない。ロールの信頼ポリシーで、このリポジトリからの実行だけに限定している。
+
+**Terraform の apply は自動化しない。**
+ephemeral 層は立てた時点から課金される。push のたびに ALB と Fargate が立つのは避けたいので、
+自動化するのはビルドと ECR への push までにした。
+
+**タグにコミットSHAを打つ。**
+`latest` だけでは、動いているタスクがどの版か後から分からない。
+
+**Dockerfile の COPY 漏れがここで見つかった。**
+`main.py` しかコピーしておらず、`tools.py`・`memory.py`・`static/` が入っていなかった。
+ローカルはフォルダをマウントして動かすため、Sprint 3 まで気づかなかった。
+
+---
+
 ## 設計判断（インフラ）
 
 ### 1. state を2層に分離した
@@ -377,6 +409,25 @@ role を USER / ASSISTANT にした TEXT コンテンツ（`interactive: false`�
 システムプロンプトの末尾に `User:` / `You:` の書き起こしとして混ぜたところ、
 正しく前回の内容を答えるようになった。
 
+### GitHub OIDC の sub にはリポジトリの不変IDが入る
+
+信頼ポリシーに `repo:<owner>/<repo>:*` と書いても
+`Not authorized to perform sts:AssumeRoleWithWebIdentity` で拒否され続けた。
+`sub`・`aud`・プロバイダのURLはすべて一致しており、設定では説明がつかなかった。
+
+CloudTrail の `AssumeRoleWithWebIdentity` イベントを見ると、実際の `principalId` はこうなっていた。
+
+```
+repo:<owner>@237700086/<repo>@1373774571:ref:refs/heads/main
+```
+
+オーナー名とリポジトリ名の後ろに不変ID（`@数字`）が付く。名前を変更しても別リポジトリに
+なりすませないようにするための仕組みで、`repo:<owner>/<repo>:*` では一致しない
+（ワイルドカードが `/` をまたげないため）。`repo:<owner>@*/<repo>@*:*` を条件に足して解決した。
+
+解説記事の多くは古い形式のままなので、条件を見比べても気づけない。
+実際の `sub` は CloudTrail の `principalId` に出るので、そこを最初に見るのが早い。
+
 ### Nova 2 Sonic はテキストのみのセッションを受け付けない
 
 コスト削減のためテキストだけで疎通確認をしようとしたところ、
@@ -485,4 +536,5 @@ AWS のドキュメント上、Nova 2 Sonic の対応言語は英語・仏語・
 - **Sprint 2** — 完了。日時・天気ツールを追加（カレンダー参照と TLS 対応は未着手）
 - **Sprint 3** — 完了。会話履歴を DynamoDB へ永続化し、スティッキーセッションを無効化
   （複数タスクでの動作確認は AWS へデプロイする際に実施）
-- **Sprint 4** — Cognito 認証、GitHub Actions による CI/CD
+- **Sprint 4** — CI/CD は完了（ビルドと ECR への push を自動化）。Cognito 認証は未着手
+- **次** — AWS へのデプロイと、複数タスクでのセッション継続の確認
