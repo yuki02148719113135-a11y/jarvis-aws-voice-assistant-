@@ -65,6 +65,7 @@
 <body>
   <h1>ジャービス</h1>
   <div class="status" id="status">待機中</div>
+  <button id="login" class="ghost" hidden>ログイン</button>
   <button id="toggle">話しかける</button>
   <button id="reset" class="ghost">履歴を消す</button>
   <div id="log"></div>
@@ -77,9 +78,53 @@ const statusEl = document.getElementById("status");
 const logEl = document.getElementById("log");
 const toggleEl = document.getElementById("toggle");
 const resetEl = document.getElementById("reset");
+const loginEl = document.getElementById("login");
+loginEl.addEventListener("click", login);
 
 // 会話の続きを読み込むための ID。サーバーが履歴の検索キーに使う。
 // タスク側には何も残らないので、再接続で別タスクに繋がっても会話は続く。
+// ---- Cognito -------------------------------------------------
+// サーバーが /config で返す。未設定ならログインなしで動く（ローカル開発）。
+let cognito = null;
+
+function tokenFromUrl() {
+  // Hosted UI は #id_token=... の形で返す。URL に残さないよう、
+  // 取り出したらすぐ履歴から消す。
+  const hash = new URLSearchParams(location.hash.slice(1));
+  const token = hash.get("id_token");
+  if (token) {
+    sessionStorage.setItem("jarvis-token", token);
+    history.replaceState(null, "", location.pathname);
+  }
+  return token;
+}
+
+function token() {
+  return sessionStorage.getItem("jarvis-token") || "";
+}
+
+function login() {
+  const url = new URL(`${cognito.login_url}/login`);
+  url.searchParams.set("client_id", cognito.client_id);
+  url.searchParams.set("response_type", "token");
+  url.searchParams.set("scope", "openid email");
+  url.searchParams.set("redirect_uri", location.origin + "/");
+  location.href = url.toString();
+}
+
+async function initAuth() {
+  const res = await fetch("/config");
+  cognito = await res.json();
+  if (!cognito.enabled) return;   // ローカル開発
+
+  tokenFromUrl();
+  if (!token()) {
+    loginEl.hidden = false;
+    toggleEl.disabled = true;
+    setStatus("ログインしてください");
+  }
+}
+
 function sessionId() {
   let id = localStorage.getItem("jarvis-session");
   if (!id) {
@@ -189,7 +234,9 @@ async function start() {
 
   setStatus("接続中...");
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws?session=${sessionId()}`);
+  const q = new URLSearchParams({ session: sessionId() });
+  if (token()) q.set("token", token());
+  ws = new WebSocket(`${proto}://${location.host}/ws?${q}`);
   ws.binaryType = "arraybuffer";
 
   ws.onmessage = (e) => {
@@ -277,6 +324,8 @@ toggleEl.addEventListener("click", async () => {
     toggleEl.disabled = false;
   }
 });
+
+initAuth();
 </script>
 </body>
 </html>

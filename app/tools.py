@@ -154,7 +154,7 @@ def get_weather(args: dict) -> dict:
         "current": "temperature_2m,weather_code,wind_speed_10m,precipitation",
         "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
         "timezone": "Asia/Tokyo",
-        "forecast_days": 3,
+        "forecast_days": 2,
     })
 
     current = forecast.get("current", {})

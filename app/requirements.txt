@@ -9,3 +9,6 @@ aws-sdk-bedrock-runtime[awscrt]
 boto3==1.35.99
 aws-credentials-http
 aws-credentials-http
+
+# Cognito の ID トークン検証
+python-jose[cryptography]==3.3.0

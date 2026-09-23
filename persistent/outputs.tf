@@ -30,3 +30,18 @@ output "github_actions_role_arn" {
   description = "GitHub Actions が assume するロール（ワークフローの vars に入れる）"
   value       = aws_iam_role.github_actions.arn
 }
+
+output "cognito_user_pool_id" {
+  description = "タスクへ環境変数で渡す（トークン検証に使う）"
+  value       = aws_cognito_user_pool.this.id
+}
+
+output "cognito_client_id" {
+  description = "ブラウザのログイン画面が使う"
+  value       = aws_cognito_user_pool_client.this.id
+}
+
+output "cognito_login_url" {
+  description = "Hosted UI のドメイン"
+  value       = "https://${aws_cognito_user_pool_domain.this.domain}.auth.ap-northeast-1.amazoncognito.com"
+}

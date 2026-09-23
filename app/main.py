@@ -30,6 +30,7 @@ from aws_sdk_bedrock_runtime.models import (
     InvokeModelWithBidirectionalStreamOutputUnknown,
 )
 
+import auth
 import memory
 from tools import TOOL_INSTRUCTIONS, TOOL_SPECS, run_tool
 
@@ -251,12 +252,31 @@ def index() -> FileResponse:
     return FileResponse("static/index.html")
 
 
+@app.get("/config")
+async def config() -> dict:
+    """ブラウザにログイン先を教える。ID は秘密ではないので公開してよい。"""
+    return {
+        "enabled": auth.enabled(),
+        "client_id": auth.CLIENT_ID,
+        "login_url": os.getenv("COGNITO_LOGIN_URL", ""),
+    }
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
 
-    # ブラウザが localStorage で持っている ID。無ければ発行してブラウザに返す。
-    session_id = ws.query_params.get("session") or str(uuid.uuid4())
+    # ログイン済みなら、履歴のキーは Cognito のユーザーID にする。
+    # 端末やブラウザが変わっても同じ履歴を引き継げる。
+    try:
+        claims = auth.verify(ws.query_params.get("token", ""))
+    except auth.AuthError as exc:
+        log.warning("認証に失敗: %s", exc)
+        await ws.send_json({"type": "error", "content": "ログインが必要です"})
+        await ws.close(code=1008)
+        return
+
+    session_id = auth.subject(claims) or ws.query_params.get("session") or str(uuid.uuid4())
     history = await memory.load_history(session_id)
     log.info("client connected (session=%s, history=%d)", session_id, len(history))
 

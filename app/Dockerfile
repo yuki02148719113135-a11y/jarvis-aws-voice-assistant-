@@ -7,7 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # ローカルはフォルダをマウントして動かすため気づきにくいが、
 # ここに書いたものだけがイメージに入る。1ファイルでも漏れると起動しない。
-COPY main.py tools.py memory.py ./
+COPY main.py tools.py memory.py auth.py ./
 COPY static ./static
 
 ENV PORT=8080
