@@ -47,13 +47,11 @@ resource "aws_lb_target_group" "this" {
     unhealthy_threshold = 3
   }
 
-  # WebSocket セッションはタスクのメモリ上にあるため、再接続時に
-  # 同じタスクへ戻す必要がある。Sprint 3 で状態を DynamoDB へ
-  # 逃がすまでは、これが唯一の会話継続手段になる。
+  # Sprint 3 で会話履歴を DynamoDB へ逃がしたため、同じタスクへ
+  # 戻す必要がなくなった。再接続が別タスクに振られても会話は続く。
   stickiness {
-    type            = "lb_cookie"
-    cookie_duration = 3600
-    enabled         = true
+    type    = "lb_cookie"
+    enabled = false
   }
 
   deregistration_delay = 30
