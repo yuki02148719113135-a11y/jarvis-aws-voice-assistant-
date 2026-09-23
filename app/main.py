@@ -30,6 +30,7 @@ from aws_sdk_bedrock_runtime.models import (
     InvokeModelWithBidirectionalStreamOutputUnknown,
 )
 
+import memory
 from tools import TOOL_INSTRUCTIONS, TOOL_SPECS, run_tool
 
 logging.basicConfig(level=logging.INFO)
@@ -93,8 +94,29 @@ class SonicSession:
             )
         )
 
-    async def start(self) -> None:
-        """session → prompt → system → audio content の順に開く。"""
+    @staticmethod
+    def history_text(history: list[dict]) -> str:
+        """履歴を書き起こしの形に整える。
+
+        role 付きの TEXT コンテンツ（interactive: false）として流し込む方法も
+        試したが、モデルの文脈には入らなかった。システムプロンプトに混ぜる形が
+        確実だった。
+        """
+        if not history:
+            return ""
+        lines = []
+        for turn in history:
+            speaker = "User" if turn["role"].upper() == "USER" else "You"
+            lines.append(f"{speaker}: {turn['content']}")
+        body = "\n".join(lines)
+        return (
+            "\n\nThe following is your earlier conversation with this same user. "
+            "Treat it as something you remember, and refer to it when asked. "
+            "Do not read it aloud.\n" + body
+        )
+
+    async def start(self, history: list[dict] | None = None) -> None:
+        """session → prompt → system（履歴込み）→ audio content の順に開く。"""
         system_content = str(uuid.uuid4())
 
         await self.send(event({
@@ -138,7 +160,10 @@ class SonicSession:
             "textInput": {
                 "promptName": self.prompt,
                 "contentName": system_content,
-                "content": f"{SYSTEM_PROMPT}\n{TOOL_INSTRUCTIONS}",
+                "content": (
+                    f"{SYSTEM_PROMPT}\n{TOOL_INSTRUCTIONS}"
+                    + self.history_text(history or [])
+                ),
             }
         }))
         await self.send(event({
@@ -229,7 +254,11 @@ def index() -> FileResponse:
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket) -> None:
     await ws.accept()
-    log.info("client connected")
+
+    # ブラウザが localStorage で持っている ID。無ければ発行してブラウザに返す。
+    session_id = ws.query_params.get("session") or str(uuid.uuid4())
+    history = await memory.load_history(session_id)
+    log.info("client connected (session=%s, history=%d)", session_id, len(history))
 
     config = await AsyncBedrockRuntimeConfig.resolve(
         region=REGION,
@@ -243,11 +272,17 @@ async def websocket_endpoint(ws: WebSocket) -> None:
         session = SonicSession(stream)
 
         async with stream:
-            await session.start()
-            await ws.send_json({"type": "ready"})
+            await session.start(history)
+            await ws.send_json({
+                "type": "ready",
+                "session": session_id,
+                "restored": len(history),
+            })
 
             pump = asyncio.create_task(browser_to_bedrock(ws, session))
-            drain = asyncio.create_task(bedrock_to_browser(ws, stream, session))
+            drain = asyncio.create_task(
+                bedrock_to_browser(ws, stream, session, session_id)
+            )
 
             done, pending = await asyncio.wait(
                 {pump, drain}, return_when=asyncio.FIRST_COMPLETED
@@ -275,7 +310,9 @@ async def browser_to_bedrock(ws: WebSocket, session: SonicSession) -> None:
         log.error("browser_to_bedrock: %s", exc)
 
 
-async def bedrock_to_browser(ws: WebSocket, stream: Any, session: SonicSession) -> None:
+async def bedrock_to_browser(
+    ws: WebSocket, stream: Any, session: SonicSession, session_id: str = ""
+) -> None:
     """Bedrock の出力をブラウザへ転送する。音声は base64 のまま渡す。"""
     _, output = await stream.await_output()
     if output is None:
@@ -292,7 +329,7 @@ async def bedrock_to_browser(ws: WebSocket, stream: Any, session: SonicSession) 
             data = json.loads(payload.decode("utf-8")).get("event", {})
 
             if "textOutput" in data:
-                await handle_text(ws, data["textOutput"], recent)
+                await handle_text(ws, data["textOutput"], recent, session_id)
 
             # toolUse で呼び出し内容を受け取り、contentEnd(TOOL) で実行する。
             # contentEnd が「モデルが結果を待っている」合図になる。
@@ -337,7 +374,9 @@ async def handle_tool(ws: WebSocket, session: SonicSession, tool_use: dict) -> N
     await ws.send_json({"type": "tool", "name": name, "result": result})
 
 
-async def handle_text(ws: WebSocket, text_output: dict, recent: deque) -> None:
+async def handle_text(
+    ws: WebSocket, text_output: dict, recent: deque, session_id: str = ""
+) -> None:
     content = text_output.get("content", "")
     role = text_output.get("role", "")
 
@@ -361,6 +400,10 @@ async def handle_text(ws: WebSocket, text_output: dict, recent: deque) -> None:
 
     log.info("[%s] %s", role or "text", content)
     await ws.send_json({"type": "text", "role": role, "content": content})
+
+    # 重複を除いたあとの確定テキストだけを記録する
+    if role.upper() in ("USER", "ASSISTANT"):
+        await memory.save_turn(session_id, role.upper(), normalized)
 
 
 app.mount("/static", StaticFiles(directory="static"), name="static")

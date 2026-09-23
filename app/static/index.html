@@ -40,6 +40,7 @@
   }
   button:disabled { opacity: .4; cursor: default; }
   button.stop { background: #d9534f; }
+  button.ghost { background: transparent; color: var(--muted); border: 1px solid #444; }
   #log {
     flex: 1;
     display: flex;
@@ -65,6 +66,7 @@
   <h1>ジャービス</h1>
   <div class="status" id="status">待機中</div>
   <button id="toggle">話しかける</button>
+  <button id="reset" class="ghost">履歴を消す</button>
   <div id="log"></div>
 
 <script>
@@ -74,6 +76,22 @@ const OUTPUT_RATE = 24000;  // Bedrock から返ってくる形式
 const statusEl = document.getElementById("status");
 const logEl = document.getElementById("log");
 const toggleEl = document.getElementById("toggle");
+const resetEl = document.getElementById("reset");
+
+// 会話の続きを読み込むための ID。サーバーが履歴の検索キーに使う。
+// タスク側には何も残らないので、再接続で別タスクに繋がっても会話は続く。
+function sessionId() {
+  let id = localStorage.getItem("jarvis-session");
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem("jarvis-session", id);
+  }
+  return id;
+}
+
+function forgetSession() {
+  localStorage.removeItem("jarvis-session");
+}
 
 let ws = null;
 let micContext = null;
@@ -171,12 +189,14 @@ async function start() {
 
   setStatus("接続中...");
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws = new WebSocket(`${proto}://${location.host}/ws?session=${sessionId()}`);
   ws.binaryType = "arraybuffer";
 
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type === "ready") {
+      if (msg.session) localStorage.setItem("jarvis-session", msg.session);
+      if (msg.restored) addNote(`— 前回の続き（${msg.restored}件を復元）—`);
       setStatus("聞いています");
     } else if (msg.type === "text") {
       addMessage(msg.role, msg.content);
@@ -238,6 +258,12 @@ function stop() {
   playing = [];
   setStatus("待機中");
 }
+
+resetEl.addEventListener("click", () => {
+  forgetSession();
+  logEl.innerHTML = "";
+  addNote("— 履歴を消しました。次の接続から新しい会話になります —");
+});
 
 toggleEl.addEventListener("click", async () => {
   if (running) { stop(); return; }

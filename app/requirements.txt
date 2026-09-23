@@ -4,3 +4,6 @@ uvicorn[standard]==0.34.0
 # awscrt エクストラが必須（標準の HTTP トランスポートは HTTP/2 の
 # 双方向イベントストリームに対応していない）。
 aws-sdk-bedrock-runtime[awscrt]
+
+# 会話履歴の DynamoDB 読み書き用
+boto3==1.35.99
