@@ -7,7 +7,9 @@
 # ---------------------------------------------------------------
 
 locals {
-  github_repo = "yuki02148719113135-a11y/jarvis-aws-voice-assistant-"
+  github_owner = "yuki02148719113135-a11y"
+  github_name  = "jarvis-aws-voice-assistant-"
+  github_repo  = "${local.github_owner}/${local.github_name}"
 }
 
 resource "aws_iam_openid_connect_provider" "github" {
@@ -25,18 +27,24 @@ data "aws_iam_policy_document" "github_assume" {
       identifiers = [aws_iam_openid_connect_provider.github.arn]
     }
 
+    # このリポジトリからの実行だけに限定する。
+    # ここを絞らないと、他人のリポジトリからでもこのロールを取れてしまう。
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
 
-    # このリポジトリからの実行だけに限定する。
-    # ここを絞らないと、他人のリポジトリからでもこのロールを取れてしまう。
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${local.github_repo}:*"]
+      # GitHub は sub にオーナーとリポジトリの不変ID（@数字）を付ける。
+      # 名前を変えてもなりすませないようにするための仕組みで、
+      # repo:owner/name:* という条件では一致しない（* が / をまたげない）。
+      values = [
+        "repo:${local.github_repo}:*",
+        "repo:${local.github_owner}@*/${local.github_name}@*:*",
+      ]
     }
   }
 }
