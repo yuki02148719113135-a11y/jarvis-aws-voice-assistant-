@@ -6,6 +6,7 @@ TOOL_SPECS に仕様を追加し、HANDLERS に実行関数を登録する。
 
 import asyncio
 import json
+import os
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -87,6 +88,10 @@ def get_date_time(_args: dict) -> dict:
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
+
+# 一時 2 に絞っていた。3日分で "Invalid input request" が出たためだが、
+# 原因は履歴を含むシステムプロンプトの肥大だった（詰まった点を参照）。
+FORECAST_DAYS = int(os.getenv("FORECAST_DAYS", "3"))
 # 実測で TLS ハンドシェイクに約6秒かかる環境があったため、余裕を持たせる
 HTTP_TIMEOUT_SECONDS = 15
 
@@ -154,7 +159,7 @@ def get_weather(args: dict) -> dict:
         "current": "temperature_2m,weather_code,wind_speed_10m,precipitation",
         "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max",
         "timezone": "Asia/Tokyo",
-        "forecast_days": 2,
+        "forecast_days": FORECAST_DAYS,
     })
 
     current = forecast.get("current", {})

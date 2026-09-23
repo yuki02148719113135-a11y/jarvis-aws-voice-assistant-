@@ -97,23 +97,27 @@ class SonicSession:
 
     @staticmethod
     def history_text(history: list[dict]) -> str:
-        """履歴を書き起こしの形に整える。
+        """履歴を、ユーザーの発言だけの箇条書きにして返す。
+
+        当初はアシスタント側の発言も含めた書き起こしを渡していたが、
+        過去にうまく答えられなかったやり取りが残っていると、モデルが
+        それを手本にして同じ調子で答えてしまった（「覚えられません」など）。
+        覚えておきたいのはユーザーが何を言ったかなので、自分の発言は渡さない。
 
         role 付きの TEXT コンテンツ（interactive: false）として流し込む方法も
         試したが、モデルの文脈には入らなかった。システムプロンプトに混ぜる形が
         確実だった。
         """
-        if not history:
+        said = [t["content"].strip() for t in history if t["role"].upper() == "USER"]
+        said = [t for t in said if t]
+        if not said:
             return ""
-        lines = []
-        for turn in history:
-            speaker = "User" if turn["role"].upper() == "USER" else "You"
-            lines.append(f"{speaker}: {turn['content']}")
-        body = "\n".join(lines)
+        body = "\n".join(f"- {t}" for t in said)
         return (
-            "\n\nThe following is your earlier conversation with this same user. "
-            "Treat it as something you remember, and refer to it when asked. "
-            "Do not read it aloud.\n" + body
+            "\n\nYou have talked with this user before. "
+            "These are things the user told you in earlier conversations. "
+            "You remember them. Never say you cannot remember. "
+            "Do not read this list aloud.\n" + body
         )
 
     async def start(self, history: list[dict] | None = None) -> None:
