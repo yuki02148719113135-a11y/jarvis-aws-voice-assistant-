@@ -11,6 +11,18 @@ resource "aws_security_group" "alb" {
     cidr_blocks = [var.allowed_cidr]
   }
 
+  # HTTPS。証明書を設定したときだけ開ける。
+  dynamic "ingress" {
+    for_each = var.certificate_arn != "" ? [1] : []
+    content {
+      description = "HTTPS"
+      from_port   = 443
+      to_port     = 443
+      protocol    = "tcp"
+      cidr_blocks = [var.allowed_cidr]
+    }
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
