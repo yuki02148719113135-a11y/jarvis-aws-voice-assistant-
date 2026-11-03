@@ -60,12 +60,19 @@ resource "aws_ecs_task_definition" "this" {
       protocol      = "tcp"
     }]
 
-    environment = [
+    environment = concat([
       { name = "AWS_REGION", value = var.region },
       { name = "BEDROCK_MODEL_ID", value = var.model_id },
       { name = "CONVERSATIONS_TABLE", value = local.persistent.conversations_table_name },
       { name = "PORT", value = tostring(var.container_port) },
-    ]
+      ],
+      # enable_cognito = true のときだけ認証を有効にする。
+      # 空のままだと auth.py が検証をスキップする（従来どおりの動き）。
+      var.enable_cognito ? [
+        { name = "COGNITO_USER_POOL_ID", value = local.persistent.cognito_user_pool_id },
+        { name = "COGNITO_CLIENT_ID", value = local.persistent.cognito_client_id },
+        { name = "COGNITO_LOGIN_URL", value = local.persistent.cognito_login_url },
+    ] : [])
 
     logConfiguration = {
       logDriver = "awslogs"

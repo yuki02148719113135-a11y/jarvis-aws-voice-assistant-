@@ -100,6 +100,17 @@ variable "model_id" {
   default     = "amazon.nova-2-sonic-v1:0"
 }
 
+variable "enable_cognito" {
+  description = <<-EOT
+    true にすると Cognito の ID をタスクへ渡し、ログインを必須にする。
+    ALB の DNS 名は apply のたびに変わるため、persistent 側の
+    cognito_callback_urls に今回の https://<ALB DNS>/ を足してから使う。
+    戻り先が一致しないと Hosted UI が redirect_mismatch で止まる。
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "log_retention_days" {
   type    = number
   default = 7
